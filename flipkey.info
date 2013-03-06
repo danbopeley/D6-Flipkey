@@ -1,0 +1,5 @@
+name           = Flipkey
+description    = Imports Flipkey reviews for display on assigned content type nodes.
+version        = 1.1
+package        = Flipkey
+core           = 6.x

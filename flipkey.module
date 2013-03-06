@@ -1,0 +1,180 @@
+<?php
+/**
+ * Define Module Constants
+ */
+define("FLIPKEY_MODULE_PATH", drupal_get_path( 'module', 'flipkey' ));
+define("FLIPKEY_BASE_URL_FEEDS", 'data.flipkey.com/feeds/reviews_remoteid');
+
+//Module Include Files.
+include_once( FLIPKEY_MODULE_PATH. '/includes/class.module.inc' );
+include_once( FLIPKEY_MODULE_PATH. '/includes/admin.module.inc' );
+
+/**
+ * Hook Menu
+ */
+function flipkey_menu() {
+  $items = array();
+  //Main admin menu.
+  $items['admin/settings/flipkey'] = array(
+    'title'             => t('FlipKey Reviews'),
+    'page callback'     => 'drupal_get_form',
+    'page arguments'    => array('_flipkey_main_settings'),
+    'type'              => MENU_NORMAL_ITEM,
+    'access arguments'  => array('administer site configuration'),
+  );
+  //Default local menu.
+  $items['admin/settings/flipkey/main'] = array(
+    'title'             => t('Main Panel'),
+    'page callback'     => 'drupal_get_form',
+    'page arguments'    => array('_flipkey_main_settings'),
+    'type'              => MENU_DEFAULT_LOCAL_TASK,
+    'access arguments'  => array('administer site configuration'),
+    'weight'            => -100,
+  );
+  
+  
+  $items['flipkey/update/all'] = array(
+    'page callback'     => '_flipkey_manual_update',
+    'type'              => MENU_CALLBACK,
+		'access arguments'  => array('administer site configuration'),
+  );
+  return $items;
+}
+
+/**
+ * Hook Node API
+ */
+function flipkey_nodeapi( &$node, $op, $a3 = NULL, $a4 = NULL ) {
+  //Switch between nodeapi $op.
+  switch ($op) {
+    //When we load nodes, if they are in our specified node type, then you can presume that there is a key there.
+    case 'load':
+    	
+    	$flipkey_node_types = variable_get('flipkey_node_types',NULL);
+    	if($flipkey_node_types){
+	      if (in_array($node->type, variable_get('flipkey_node_types',NULL))) {
+	        $property_id_key = variable_get('flipkey_property_id_key', NULL);
+	        $review = flipkey::_getFlipkeyReview($node->$property_id_key, $node->nid);
+	        if (!empty($review)) {
+	          //If we have a review that has themed output, then we add it to the node object, so you can theme it at your leisure.
+	          $node->flipkey_review = $review;
+	        }
+	      }
+    	}
+    break;
+  }
+}
+
+
+/**
+ * Hook Theme
+ */
+function flipkey_theme() {
+  $theme = array();
+  $path  = FLIPKEY_MODULE_PATH .'/theme';
+  //This works in our theme implementation.
+  $theme['flipkey_widget'] = array (
+    'file'      => 'theme.flipkey.inc',
+    'path'      => $path,
+    'pattern'   => 'flipkey_widget__',
+    'template'  => 'flipkey-widget',
+    'arguments' => array('widget' => NULL),
+  );
+  return $theme;
+}
+
+
+function flipkey_cron() {
+  
+  //_flipkey_import_reviews();
+  
+}
+
+function _flipkey_manual_update() {
+ 
+  _flipkey_import_reviews();
+ 
+}
+
+
+
+function _flipkey_import_reviews() {
+  
+	//grab nid,title,prop_id for all properties
+	$allprops = db_query("SELECT node.nid AS nid, node.title AS nodetitle, ldisilink_property.prop_id AS ldisilink_property_prop_id FROM {node} node  
+	LEFT JOIN {ldisilink_property} ldisilink_property ON node.nid = ldisilink_property.nid 
+	WHERE node.type  = 'ldisilink_property'
+	ORDER BY nid ASC");
+	
+
+	//we also need a count of all properties used below
+ $propcount = db_result(db_query("SELECT COUNT(node.nid) AS nidcount FROM {node} node  
+	LEFT JOIN {ldisilink_property} ldisilink_property ON node.nid = ldisilink_property.nid 
+	WHERE node.type  = 'ldisilink_property'"));
+ 
+ 
+
+	
+	$ctr = 1;
+	$totctr = 1;	
+	$last_updated_node = variable_get('flipkey_last_updated_node',0);
+	$debug = array();
+	while ($prop = db_fetch_array($allprops)) { 
+		
+		
+		
+		$cur_pnid = $prop['nid'];
+		$cur_tit = $prop['nodetitle'];
+		$cur_prid = $prop['ldisilink_property_prop_id'];
+		if($cur_prid && ($cur_pnid > $last_updated_node)){
+			
+			//kpr($prop);
+			
+			$existingreview = flipkey::_findFlipkeyReview($cur_pnid, $cur_prid);
+			
+			//configure data for review import
+			$import_cfg = array(
+			'prid' => $cur_prid, //keyed field in cck type assigned to flipkey remote id for property
+			'pnid' => $cur_pnid,  //property cck node id
+			'erid' => $existingreview  //existing review id if it exists
+			);
+	
+
+			//let the magic begin
+			$import = flipkey::_importFlipkeyReview($import_cfg);
+			//kpr($import);
+			//compile a message string for set message in mnual update
+			$mess[] = $cur_tit.' | '.$cur_pnid.' | '.$cur_prid.'<br />';
+			$ctr++;
+		}
+
+		/*
+		tally total rows and check if at last property in $allprops
+		ifso then reset flipkey_last_updated_node = 0 to start process over
+		on next cron or manual update
+		else see if we have iterated threshold if so break and 
+		set flipkey_last_updated_node = last property updated 
+		*/
+		$totctr++;
+		if($totctr == $propcount){
+			variable_set('flipkey_last_updated_node', 0);
+		}else if($ctr == 11){
+			variable_set('flipkey_last_updated_node', $cur_pnid);
+			break;
+		}
+		
+	}
+	
+	/*
+	if this was a manual update then find destination, set mess, and goto destination
+	to return to flipkey admin panel 
+	*/	
+  if ($_GET['destination']) { 	
+  	$messstr = implode('',$mess);
+  	$mess = t('<table><tr><td valign="top">The following properties were updated successfully:<br />'.$messstr.'</td></tr></table>');
+    drupal_set_message($mess);
+    drupal_goto($_GET['destination'].'#tools');
+  }
+
+
+}
